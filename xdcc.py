@@ -4,6 +4,7 @@ import thread
 import time
 import random
 import re
+import sqlite3
 from datetime import datetime
 from collections import deque
 
@@ -86,12 +87,22 @@ class Xdcc:
         source = s.makefile()
         destination = open(filename, 'ab')
         bufsize = 2**20
+        start = None
+        total_start = datetime.now()
+        bandwidth = '?'
         while 1:
             position = os.path.getsize(filename)
             if position >= size:
                 break
-            self.log("%s - %i / %i (%i%%)" % (filename, position, size, position * 100 / size))
+            if start is not None:
+                now = datetime.now()
+                elapsed = now - start
+                bandwidth = "%.1f" % (bufsize / elapsed.total_seconds() / 1000)
+            total_elapsed = datetime.now() - total_start
+            average_bandwidth = "%.1f" % (position / total_elapsed.total_seconds() / 1000)
+            self.log("%s - %i / %i (%i%%) at %s KB/s (avg %s KB/s)" % (filename, position, size, position * 100 / size, bandwidth, average_bandwidth))
             try:
+                start = datetime.now()
                 data = source.read(min(size - position, bufsize))
             except socket.error as e:
                 self.log('Error downloading.')
@@ -281,33 +292,101 @@ class Xdcc:
 
 class OfferObserver:
     def __init__(self):
-        pass
+        self.connection = sqlite3.connect('xdcc.db', check_same_thread=False, isolation_level=None)
+        self.create_tables()
+        self.offers = {}
 
+    def create_tables(self):
+        self.connection.execute('''create table if not exists offers (
+                                   network text, channel text, nick text, 
+                                   number integer, name text, size text, gets integer, date datetime,
+                                   primary key(network, nick, number))''')
+
+    # ^B**^B <count> packs ^B**^B  <open_slots> of <slots> slots open, Min: <min_bw>, Record: <record_bw>
+    # ^B**^B Bandwidth Usage ^B**^B Current: <current_bw>, Record: <record_bw>
+    # ^B**^B To request a file, type "/MSG <nick> XDCC SEND x" ^B**^B
+    # ^B#<number>  ^B   <gets>x [ <size>] ^B<filename>^O
+    # Total Offered: <size>  Total Transferred: <size>
     def channel_message(self, network, channel, nick, message):
-        m = re.match('.*?#(\d+).*? +(\d+)x \[(.*?)] (.*)', message)
+        # ^B#<number>  ^B   <gets>x [ <size>] ^B<filename>^O
+        m = re.match('.*?#(\d+).*? +(\d+)x \[ *(.*?)] (.*)', message)
         if m is not None:
-            number = long(m.group(1))
-            gets = long(m.group(2))
+            number = m.group(1)
+            gets = m.group(2)
             size = m.group(3)
             filename = m.group(4)
-            self.offer(network, channel, nick, number, filename, gets, size)
+            return self.offer(network, nick, number, filename, gets, size)
+        # ^B**^B <count> packs ^B**^B  <open_slots> of <slots> slots open, Min: <min_bw>, Record: <record_bw>
+        m = re.match('.*?(\d+) packs .*? +(\d+) of (\d+) slots open', message)
+        if m is not None:
+            count = m.group(1)
+            open_slots = m.group(2)
+            slots = m.group(3)
+            return self.start_offer(network, channel, nick, count, open_slots, slots)
+        # ^B**^B Bandwidth Usage ^B**^B Current: <current_bw>, Record: <record_bw>
+        m = re.match('.*?Bandwidth Usage.+?Current: (.+), Record: (.+)', message)
+        if m is not None:
+            current_bw = m.group(1)
+            record_bw = m.group(2)
+            return self.bw_offer(network, nick, current_bw, record_bw)
+        # Total Offered: <size>  Total Transferred: <size>
+        m = re.match('.*?Total Offered: +(.+) +Total Transferred: +(.+)', message)
+        if m is not None:
+            offer_size = m.group(1)
+            transfer_size = m.group(2)
+            return self.finish_offer(network, nick, offer_size, transfer_size)
 
-    def offer(self, network, channel, nick, number, filename, gets, size):
+    def start_offer(self, network, channel, nick, count, open_slots, slots):
+        self.log(network, "Collecting %s offers for %s in %s" % (count, nick, channel))
+        self.offers[network, nick] = {'network': network, 'channel': channel, 'nick': nick, 'count': count,
+                                      'slots': slots, 'open_slots': open_slots, 'packs': {}}
+
+    def bw_offer(self, network, nick, current_bw, record_bw):
+        if (network, nick) not in self.offers:
+            return
+        offer = self.offers[network, nick]
+        offer['current_bw'] = current_bw
+        offer['record_bw'] = record_bw
+
+    def finish_offer(self, network, nick, size, transferred):
+        if (network, nick) not in self.offers:
+            return
+        offer = self.offers[network, nick]
+        offer['size'] = size
+        offer['transferred'] = transferred
+        self.write_offer(offer)
+        del self.offers[network, nick]
+
+    def write_offer(self, offer):
+        self.log(offer['network'], "Writing %s packs for %s in %s" % (offer['count'], offer['nick'], offer['channel']))
+        inserts = []
+        for key in offer['packs']:
+            pack = offer['packs'][key]
+            inserts.append((offer['network'], offer['channel'], offer['nick'],
+                            pack['number'], pack['filename'], pack['size'], pack['gets'], datetime.now()))
+        self.connection.execute('delete from offers where network=? and nick=?', (offer['network'], offer['nick']))
+        self.connection.executemany('replace into offers values(?,?,?,?,?,?,?,?)', inserts)
+
+    def offer(self, network, nick, number, filename, gets, size):
+        if (network, nick) not in self.offers:
+            return
         filename = self.strip_format_codes(filename)
-        line = "%s\t%s\t%s\t%s\t%i\t%s\t%i\t%s\n" % (datetime.now(), network, channel, nick, number, filename, gets, size)
-        f = open('offers.txt', 'a')
-        f.write(line)
-        f.close()
+        offer = self.offers[network, nick]
+        offer['packs'][number] = {'number': number, 'filename': filename, 'size': size, 'gets': gets}
 
     def strip_format_codes(self, str):
         regex = re.compile("\x1f|\x02|\x12|\x0f|\x16|\x03(?:\d{1,2}(?:,\d{1,2})?)?", re.UNICODE)
         return regex.sub("", str)
 
+    def log(self, network, message):
+        print "%s\t%s\t%s" % (datetime.now(), network, message)
+
 
 def xdcc(servers):
+    offer_observer = OfferObserver()
     load_queue()
     for server in servers:
-        Xdcc(server, [OfferObserver()]).start()
+        Xdcc(server, [offer_observer]).start()
     while 1:
         time.sleep(5)
         add()
