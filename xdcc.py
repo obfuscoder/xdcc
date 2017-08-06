@@ -43,6 +43,7 @@ class Xdcc:
         self.host = config['host']
         self.port = config['port']
         self.channels = config['channels']
+        self.sf = None
 
     def start(self):
         thread.start_new_thread(self.run, ())
@@ -78,12 +79,12 @@ class Xdcc:
     def store_queue(self):
         write_collection(QUEUE, 'queue.txt', 'w')
 
-    def send(self, f, msg):
+    def send(self, msg):
         if DEBUG == 1:
             self.log("SEND: %s" % msg)
-        f.write(msg)
-        f.write('\r\n')
-        f.flush()
+        self.sf.write(msg)
+        self.sf.write('\r\n')
+        self.sf.flush()
 
     def download(self, qe, filename, addr_number, port, size):
         qe['status'] = 'downloading'
@@ -120,8 +121,8 @@ class Xdcc:
             self.done(qe)
 
     def run(self):
-        sf = self.connect()
-        self.send_user_info(sf)
+        self.sf = self.connect()
+        self.send_user_info()
 
         ip_address = 0
         size = 0
@@ -136,8 +137,8 @@ class Xdcc:
                     break
             if active and qe is not None:
                 if qe['status'] == 'new' or (qe['status'] == 'requested' and qe['time'] + 5*60 < time.time()):
-                    self.send_request(sf, qe)
-            line = sf.readline().strip()
+                    self.send_request(qe)
+            line = self.sf.readline().strip()
             if line == '':
                 continue
             if DEBUG == 1:
@@ -147,10 +148,10 @@ class Xdcc:
                 self.log('RECEIVED ERROR. Exiting!')
                 break
             if source == 'PING':
-                self.send(sf, 'PONG %s' % rest)
+                self.send('PONG %s' % rest)
                 continue
             if (source == ":%s" % NICK or rest.find('MODE %s' % NICK) >= 0) and joining == 0:
-                self.join_channels(sf)
+                self.join_channels()
                 joining = 1
                 continue
             if rest.find('366') == 0:  # end of names list
@@ -194,17 +195,17 @@ class Xdcc:
                     if rest.find("\1DCC SEND") >= 0:
                         dcc_params, filename, ip_address, port, size = self.parse_dcc_send_message(rest)
                         if port == 0 and len(dcc_params) == 7:
-                            self.fail_with_reverse_dcc(filename, qe, sf)
+                            self.fail_with_reverse_dcc(filename, qe)
                             continue
                         if filename != qe['filename']:
-                            self.fail_with_wrong_file_name(filename, qe, sf)
+                            self.fail_with_wrong_file_name(filename, qe)
                             continue
                         if os.path.isfile(filename) and os.path.getsize(filename) > 0:
                             filesize = os.path.getsize(filename)
                             if filesize >= size:
-                                self.abort_resend_and_move_to_done(filename, qe, sf)
+                                self.abort_resend_and_move_to_done(filename, qe)
                             else:
-                                self.send_resume(filename, filesize, port, qe, sf)
+                                self.send_resume(filename, filesize, port, qe)
                         else:
                             thread.start_new_thread(self.download, (qe, filename, ip_address, port, size))
                         continue
@@ -226,27 +227,27 @@ class Xdcc:
         (dcc, accept, filename, port, position) = dccinfo.split(' ')
         thread.start_new_thread(self.download, (qe, filename, ip_address, long(port), size))
 
-    def send_resume(self, filename, filesize, port, qe, sf):
+    def send_resume(self, filename, filesize, port, qe):
         self.log("Resuming %s which is %i Bytes in size" % (filename, filesize))
-        self.send(sf, "PRIVMSG %s :\1DCC RESUME %s %i %i\1" % (qe['nick'], filename, port, filesize))
+        self.send("PRIVMSG %s :\1DCC RESUME %s %i %i\1" % (qe['nick'], filename, port, filesize))
 
-    def abort_resend_and_move_to_done(self, filename, qe, sf):
+    def abort_resend_and_move_to_done(self, filename, qe):
         self.log("Aborting resend of done %s" % filename)
         self.done(qe)
-        self.send(sf, "NOTICE %s :\1DCC REJECT SEND %s\1" % (qe['nick'], filename))
-        self.send(sf, "PRIVMSG %s :XDCC CANCEL" % qe['nick'])
+        self.send("NOTICE %s :\1DCC REJECT SEND %s\1" % (qe['nick'], filename))
+        self.send("PRIVMSG %s :XDCC CANCEL" % qe['nick'])
 
-    def fail_with_wrong_file_name(self, filename, qe, sf):
+    def fail_with_wrong_file_name(self, filename, qe):
         self.log("Failed download from %s. Expected file %s but received %s" % (qe['nick'], qe['filename'], filename))
         self.fail_with_status(qe, 'wrong_filename')
-        self.send(sf, "NOTICE %s :\1DCC REJECT SEND %s\1" % (qe['nick'], filename))
-        self.send(sf, "PRIVMSG %s :XDCC CANCEL" % qe['nick'])
+        self.send("NOTICE %s :\1DCC REJECT SEND %s\1" % (qe['nick'], filename))
+        self.send("PRIVMSG %s :XDCC CANCEL" % qe['nick'])
 
-    def fail_with_reverse_dcc(self, filename, qe, sf):
+    def fail_with_reverse_dcc(self, filename, qe):
         self.log("Failed download from %s for %s. Revere DCC not supported." % (qe['nick'], filename))
         self.fail_with_status(qe, 'reverse_dcc_required')
-        self.send(sf, "NOTICE %s :\1DCC REJECT SEND %s\1" % (qe['nick'], filename))
-        self.send(sf, "PRIVMSG %s :XDCC CANCEL" % qe['nick'])
+        self.send("NOTICE %s :\1DCC REJECT SEND %s\1" % (qe['nick'], filename))
+        self.send("PRIVMSG %s :XDCC CANCEL" % qe['nick'])
 
     def fail_with_invalid(self, qe):
         self.log("Failed download from %s for %s. Invalid packet number." % (qe['nick'], qe['filename']))
@@ -262,14 +263,14 @@ class Xdcc:
         self.log("Failed download from %s for %s. Bot offline." % (qe['nick'], qe['filename']))
         self.fail_with_status(qe, 'offline')
 
-    def join_channels(self, sf):
+    def join_channels(self):
         for channel in self.channels:
             self.log("Joining %s" % channel)
-            self.send(sf, 'JOIN %s' % channel)
+            self.send('JOIN %s' % channel)
 
-    def send_request(self, sf, qe):
+    def send_request(self, qe):
         self.log("Requesting packet %i (%s) from %s" % (qe['number'], qe['filename'], qe['nick']))
-        self.send(sf, "PRIVMSG %s :xdcc send #%i" % (qe['nick'], qe['number']))
+        self.send("PRIVMSG %s :xdcc send #%i" % (qe['nick'], qe['number']))
         self.requested(qe)
 
     def requested(self, qe):
@@ -289,9 +290,9 @@ class Xdcc:
         s.connect((self.host, self.port))
         return s.makefile()
 
-    def send_user_info(self, sf):
-        self.send(sf, 'NICK %s' % NICK)
-        self.send(sf, 'USER %s 0 * :%s' % (NICK, NICK))
+    def send_user_info(self):
+        self.send('NICK %s' % NICK)
+        self.send('USER %s 0 * :%s' % (NICK, NICK))
 
 
 def xdcc(servers):
