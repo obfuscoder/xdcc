@@ -364,8 +364,11 @@ class OfferObserver:
             pack = offer['packs'][key]
             inserts.append((offer['network'], offer['channel'], offer['nick'],
                             pack['number'], pack['filename'], pack['size'], pack['gets'], datetime.now()))
-        self.connection.execute('delete from offers where network=? and nick=?', (offer['network'], offer['nick']))
-        self.connection.executemany('replace into offers values(?,?,?,?,?,?,?,?)', inserts)
+        try:
+            self.connection.execute('delete from offers where network=? and nick=?', (offer['network'], offer['nick']))
+            self.connection.executemany('replace into offers values(?,?,?,?,?,?,?,?)', inserts)
+        except sqlite3.DatabaseError as e:
+            self.log(offer['network'], "Error while trying to write packs for %s: %s" % (offer['nick'], e.message))
 
     def offer(self, network, nick, number, filename, gets, size):
         if (network, nick) not in self.offers:
