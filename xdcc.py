@@ -38,12 +38,13 @@ def load_queue():
 
 
 class Xdcc:
-    def __init__(self, config):
+    def __init__(self, config, observers):
         self.network = config['network']
         self.host = config['host']
         self.port = config['port']
         self.channels = config['channels']
         self.sf = None
+        self.observers = observers
 
     def start(self):
         thread.start_new_thread(self.run, ())
@@ -59,17 +60,6 @@ class Xdcc:
         self.append('done.txt', qe)
         QUEUE.remove(qe)
         store_queue()
-
-    def offer(self, channel, nick, number, filename, gets, size):
-        filename = self.strip_format_codes(filename)
-        line = "%s\t%s\t%s\t%s\t%i\t%s\t%i\t%s\n" % (datetime.now(), self.network, channel, nick, number, filename, gets, size)
-        f = open('offers.txt', 'a')
-        f.write(line)
-        f.close()
-
-    def strip_format_codes(self, str):
-        regex = re.compile("\x1f|\x02|\x12|\x0f|\x16|\x03(?:\d{1,2}(?:,\d{1,2})?)?", re.UNICODE)
-        return regex.sub("", str)
 
     def append(self, filename, qe):
         f = open(filename, 'a')
@@ -160,17 +150,11 @@ class Xdcc:
             if m is not None:
                 nick = m.group(1)
                 (action, trail) = rest.split(' ', 1)
-                # :<botname>!xxxxxxx PRIVMSG #<channel> :#<number>  <downloads>x [<size>] <filename>
                 if action == 'PRIVMSG':
                     (target, data) = trail.split(' ', 1)
                     if target in self.channels:
-                        m = re.match('.*?#(\d+).*? +(\d+)x \[(.*?)] (.*)', data)
-                        if m is not None:
-                            number = long(m.group(1))
-                            gets = long(m.group(2))
-                            size = m.group(3)
-                            filename = m.group(4)
-                            self.offer(target, nick, number, filename, gets, size)
+                        for observer in self.observers:
+                            observer.channel_message(self.network, target, nick, data)
                         continue
             if qe is None:
                 continue
@@ -295,10 +279,35 @@ class Xdcc:
         self.send('USER %s 0 * :%s' % (NICK, NICK))
 
 
+class OfferObserver:
+    def __init__(self):
+        pass
+
+    def channel_message(self, network, channel, nick, message):
+        m = re.match('.*?#(\d+).*? +(\d+)x \[(.*?)] (.*)', message)
+        if m is not None:
+            number = long(m.group(1))
+            gets = long(m.group(2))
+            size = m.group(3)
+            filename = m.group(4)
+            self.offer(network, channel, nick, number, filename, gets, size)
+
+    def offer(self, network, channel, nick, number, filename, gets, size):
+        filename = self.strip_format_codes(filename)
+        line = "%s\t%s\t%s\t%s\t%i\t%s\t%i\t%s\n" % (datetime.now(), network, channel, nick, number, filename, gets, size)
+        f = open('offers.txt', 'a')
+        f.write(line)
+        f.close()
+
+    def strip_format_codes(self, str):
+        regex = re.compile("\x1f|\x02|\x12|\x0f|\x16|\x03(?:\d{1,2}(?:,\d{1,2})?)?", re.UNICODE)
+        return regex.sub("", str)
+
+
 def xdcc(servers):
     load_queue()
     for server in servers:
-        Xdcc(server).start()
+        Xdcc(server, [OfferObserver()]).start()
     while 1:
         time.sleep(5)
         add()
