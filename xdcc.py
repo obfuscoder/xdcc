@@ -4,7 +4,7 @@ import thread
 import time
 import random
 import re
-import sqlite3
+
 from datetime import datetime
 from collections import deque
 
@@ -292,14 +292,13 @@ class Xdcc:
 
 class OfferObserver:
     def __init__(self):
-        self.connection = sqlite3.connect('xdcc.db', check_same_thread=False, isolation_level=None)
-        self.create_tables()
+        self.connection = mysql.connector.connect(user='xdcc', password='xdcc', host='127.0.0.1', database='xdcc')
         self.offers = {}
 
     def create_tables(self):
         self.connection.execute('''create table if not exists offers (
-                                   network text, channel text, nick text, 
-                                   number integer, name text, size text, gets integer, date datetime,
+                                   network varchar(32), channel varchar(32), nick varchar(64), 
+                                   number integer, name varchar(255), size varchar(16), gets integer, date datetime,
                                    primary key(network, nick, number))''')
 
     # ^B**^B <count> packs ^B**^B  <open_slots> of <slots> slots open, Min: <min_bw>, Record: <record_bw>
